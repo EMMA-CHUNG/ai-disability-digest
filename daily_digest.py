@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-AI & Disability Daily Digest
-Automatically search, summarize and send daily digest emails
-Using Google Gemini API (Free)
+AI & Disability Daily Digest - Enhanced Version
+Search window: 30 Days | Sources: Google News, Reddit, arXiv
 """
 
 import os
@@ -13,329 +12,203 @@ import google.generativeai as genai
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import json
+import re
 
 # ====== Configuration ======
-# These will be read from GitHub Secrets or environment variables
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 EMAIL_FROM = os.environ.get('EMAIL_FROM', '')
 EMAIL_TO = os.environ.get('EMAIL_TO', '')
-EMAIL_PASSWORD = os.environ.get('EMAIL_PASSWORD', '')  # Gmail App Password
+EMAIL_PASSWORD = os.environ.get('EMAIL_PASSWORD', '') # Must be a 16-digit App Password
 
-# RSS Source List
+# RSS Sources (Expanded to Micro-Niches and Reddit)
 RSS_SOURCES = [
-    # AI News
-    {
-        'url': 'https://news.google.com/rss/search?q=artificial+intelligence+disability&hl=en-US&gl=US&ceid=US:en',
-        'name': 'Google News - AI & Disability'
-    },
-    {
-        'url': 'https://news.google.com/rss/search?q=AI+assistive+technology&hl=en-US&gl=US&ceid=US:en',
-        'name': 'Google News - AI Assistive Tech'
-    },
-    {
-        'url': 'https://news.google.com/rss/search?q=machine+learning+accessibility&hl=en-US&gl=US&ceid=US:en',
-        'name': 'Google News - ML Accessibility'
-    },
-    # arXiv AI papers (optional)
-    {
-        'url': 'http://export.arxiv.org/rss/cs.AI',
-        'name': 'arXiv - Artificial Intelligence'
-    },
+    # Google News - AI + Specific Disability Areas (30 day window)
+    {'name': 'Google News - AI & Disability', 'url': 'https://news.google.com/rss/search?q=%22artificial+intelligence%22+disability+when:30d&hl=en-US&gl=US&ceid=US:en'},
+    {'name': 'Google News - AI & Accessibility', 'url': 'https://news.google.com/rss/search?q=AI+%22accessibility%22+OR+a11y+when:30d&hl=en-US&gl=US&ceid=US:en'},
+    {'name': 'Google News - AI Vision/Blind', 'url': 'https://news.google.com/rss/search?q=AI+blind+OR+%22visually+impaired%22+when:30d&hl=en-US&gl=US&ceid=US:en'},
+    {'name': 'Google News - AI Hearing/Deaf', 'url': 'https://news.google.com/rss/search?q=AI+deaf+OR+%22hearing+loss%22+when:30d&hl=en-US&gl=US&ceid=US:en'},
+    {'name': 'Google News - AI Neurodiversity', 'url': 'https://news.google.com/rss/search?q=AI+autism+OR+dyslexia+OR+cognitive+when:30d&hl=en-US&gl=US&ceid=US:en'},
+    
+    # Reddit Communities (Free RSS)
+    {'name': 'Reddit - Accessibility', 'url': 'https://www.reddit.com/r/accessibility/search.rss?q=AI&restrict_sr=on&sort=relevance&t=month'},
+    {'name': 'Reddit - Disability', 'url': 'https://www.reddit.com/r/disability/search.rss?q=AI&restrict_sr=on&sort=relevance&t=month'},
+    {'name': 'Reddit - Blind', 'url': 'https://www.reddit.com/r/blind/search.rss?q=AI&restrict_sr=on&sort=relevance&t=month'},
+    
+    # Research
+    {'name': 'arXiv - AI Research', 'url': 'http://export.arxiv.org/rss/cs.AI'},
 ]
 
-# ====== Core Functions ======
-
 def fetch_articles():
-    """Fetch articles from all RSS sources"""
+    """Fetch articles from all RSS sources (Last 30 days)"""
     all_articles = []
+    seen_links = set()
     today = datetime.now()
-    yesterday = today - timedelta(days=1)
+    # Increase window to 30 days to ensure a larger pool
+    start_date = today - timedelta(days=30)
     
-    print(f"📰 Fetching articles... {today.strftime('%Y-%m-%d')}")
+    print(f"📰 Starting search... (Window: {start_date.strftime('%Y-%m-%d')} to Today)")
     
     for source in RSS_SOURCES:
         try:
             print(f"  - Fetching: {source['name']}")
-            feed = feedparser.parse(source['url'])
+            # Adding a user-agent to prevent Reddit from blocking the script
+            feed = feedparser.parse(source['url'], agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AI-Digest-Bot/1.0')
             
-            for entry in feed.entries[:10]:  # Max 10 articles per source
-                # Check if article is recent
+            for entry in feed.entries[:50]: # Check up to 50 articles per source
+                link = entry.get('link', '')
+                if link in seen_links: continue
+                
                 pub_date = None
                 if hasattr(entry, 'published_parsed'):
                     pub_date = datetime(*entry.published_parsed[:6])
                 
-                # Only get articles from last 2 days
-                if pub_date and pub_date < yesterday:
+                # Filter by date
+                if pub_date and pub_date < start_date:
                     continue
                 
                 article = {
                     'title': entry.get('title', 'No Title'),
-                    'link': entry.get('link', ''),
-                    'summary': entry.get('summary', '')[:300],  # Limit length
+                    'link': link,
+                    'summary': entry.get('summary', '')[:500],
                     'source': source['name'],
                     'published': pub_date.strftime('%Y-%m-%d') if pub_date else 'Recent'
                 }
                 all_articles.append(article)
+                seen_links.add(link)
                 
         except Exception as e:
-            print(f"  ⚠️  Error: {source['name']} - {str(e)}")
-            continue
-    
-    print(f"✅ Fetched {len(all_articles)} articles total")
+            print(f"  ⚠️ Error in {source['name']}: {str(e)}")
+            
+    print(f"✅ Total articles collected: {len(all_articles)}")
     return all_articles
 
-
 def filter_relevant_articles(articles):
-    """Filter relevant articles - ensure they contain AI and Disability keywords"""
-    keywords = [
-        'disability', 'disabilities', 'accessible', 'accessibility',
-        'assistive', 'inclusive', 'inclusion', 'impairment',
-        'blind', 'deaf', 'wheelchair', 'autism', 'cognitive'
+    """Filter articles that MUST contain one keyword from BOTH lists"""
+    # Expanded keywords to catch more niche topics
+    disability_keywords = [
+        'disability', 'disabilities', 'accessible', 'accessibility', 'a11y',
+        'assistive', 'inclusive', 'inclusion', 'impairment', 'blind', 'blindness',
+        'deaf', 'deafness', 'hearing loss', 'visually impaired', 'wheelchair', 
+        'autism', 'autistic', 'neurodiverse', 'neurodiversity', 'cognitive', 
+        'dyslexia', 'mobility', 'paralysis', 'prosthetic', 'special needs'
     ]
     
-    ai_keywords = ['ai', 'artificial intelligence', 'machine learning', 'deep learning', 'neural']
+    ai_keywords = [
+        'ai', 'artificial intelligence', 'machine learning', 'deep learning', 
+        'neural', 'generative ai', 'genai', 'chatgpt', 'llm', 'large language model',
+        'gemini', 'robotics', 'automation', 'computer vision', 'speech-to-text',
+        'text-to-speech', 'nlp', 'natural language processing'
+    ]
     
     relevant = []
     for article in articles:
-        text = (article['title'] + ' ' + article['summary']).lower()
+        content = (article['title'] + ' ' + article['summary']).lower()
         
-        # Must contain both AI and Disability keywords
-        has_ai = any(kw in text for kw in ai_keywords)
-        has_disability = any(kw in text for kw in keywords)
+        has_ai = any(f" {kw} " in f" {content} " or kw in article['title'].lower() for kw in ai_keywords)
+        has_disability = any(f" {kw} " in f" {content} " or kw in article['title'].lower() for kw in disability_keywords)
         
         if has_ai and has_disability:
             relevant.append(article)
     
-    print(f"🔍 After filtering: {len(relevant)} relevant articles")
+    print(f"🔍 Articles matching both AI & Disability filters: {len(relevant)}")
     return relevant
-
 
 def generate_digest_with_gemini(articles):
     """Generate digest using Gemini API"""
-    if not articles:
-        return None
+    if not articles: return None
     
-    print("🤖 Generating digest with Gemini...")
-    
-    # Configure Gemini API
+    print("🤖 AI is synthesizing the digest...")
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel('gemini-pro')
     
-    # Prepare article list
     articles_text = "\n\n".join([
-        f"Article {i+1}:\nTitle: {article['title']}\nLink: {article['link']}\nSummary: {article['summary']}\nSource: {article['source']}"
-        for i, article in enumerate(articles[:15])  # Max 15 articles
+        f"Source: {a['source']}\nTitle: {a['title']}\nLink: {a['link']}\nSummary: {a['summary']}"
+        for a in articles[:20] # Limit to top 20 for AI processing
     ])
     
-    # Prompt
     prompt = f"""
-You are a professional tech news editor specializing in AI and disability topics.
+    You are an expert editor in AI and Assistive Technology. 
+    Create a professional daily digest from these articles:
+    {articles_text}
 
-Here are today's collected articles:
-
-{articles_text}
-
-Please compile these articles into a professional daily digest with this format:
-
-# 🤖 AI & Disability Daily Digest
-📅 {datetime.now().strftime('%B %d, %Y')}
-
-## 🔥 Today's Highlights
-[Select the 1-2 most important articles and write detailed 100-150 word summaries explaining why they matter]
-
-## 📰 Important News (ranked by importance)
-[List other important articles, each including:]
-- **[Title]** ([Original Link](link))
-  - 📝 [50-80 word summary]
-  - 🔑 Keywords: [3-5 relevant keywords]
-
-## 💡 Tech Trends Analysis
-[From today's articles, summarize 2-3 technical trends or observations]
-
-## 📊 Today's Statistics
-- Articles analyzed: {len(articles)}
-- Main areas: [list main application areas]
-- Focus topics: [list trending keywords]
-
----
-💌 This is an automatically generated digest. Sources: Google News, arXiv, etc.
-
-Please write in professional but accessible English and ensure all links are correct.
-"""
+    Format requirements:
+    1. A bold Header: # 🤖 AI & Disability Daily Digest
+    2. Date: {datetime.now().strftime('%B %d, %Y')}
+    3. section: ## 🔥 Top Breakthroughs (Detailed summary of the 2 best articles)
+    4. section: ## 📰 Global News (Bulleted list of other articles with links and 1-sentence summaries)
+    5. section: ## 💡 Future Implications (Your analysis of how this tech changes lives)
+    """
     
     try:
         response = model.generate_content(prompt)
-        digest = response.text
-        print("✅ Digest generated successfully!")
-        return digest
-        
+        return response.text
     except Exception as e:
-        print(f"❌ Gemini API error: {str(e)}")
+        print(f"❌ Gemini Error: {str(e)}")
         return None
 
-
-def create_html_email(digest_content):
-    """Convert Markdown digest to beautiful HTML email"""
+def create_html_email(content):
+    """Converts Markdown to a pretty HTML Email"""
+    # Basic Markdown to HTML conversion
+    html = content
+    html = html.replace('# ', '<h1>').replace('\n## ', '</h1><br><h2>').replace('\n### ', '</h2><h3>')
+    html = re.sub(r'\[([^\]]+)\]\(([^\)]+)\)', r'<a href="\2">\1</a>', html)
+    html = re.sub(r'\*\*([^\*]+)\*\*', r'<strong>\1</strong>', html)
+    html = html.replace('\n- ', '<br>• ')
     
-    # Simple Markdown to HTML conversion
-    html_content = digest_content
-    
-    # Convert headers
-    html_content = html_content.replace('# ', '<h1>').replace('\n## ', '</h1>\n<h2>').replace('\n### ', '</h2>\n<h3>')
-    
-    # Convert links [text](url)
-    import re
-    html_content = re.sub(r'\[([^\]]+)\]\(([^\)]+)\)', r'<a href="\2">\1</a>', html_content)
-    
-    # Convert bold
-    html_content = re.sub(r'\*\*([^\*]+)\*\*', r'<strong>\1</strong>', html_content)
-    
-    # Convert lists
-    html_content = html_content.replace('\n- ', '<br>• ')
-    
-    # Add styling
-    styled_html = f"""
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <style>
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Helvetica Neue', sans-serif;
-            line-height: 1.6;
-            color: #333;
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 20px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        }}
-        .container {{
-            background: white;
-            border-radius: 16px;
-            padding: 40px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
-        }}
-        h1 {{
-            color: #667eea;
-            border-bottom: 3px solid #667eea;
-            padding-bottom: 10px;
-            font-size: 28px;
-        }}
-        h2 {{
-            color: #764ba2;
-            margin-top: 30px;
-            font-size: 22px;
-        }}
-        h3 {{
-            color: #555;
-            font-size: 18px;
-        }}
-        a {{
-            color: #667eea;
-            text-decoration: none;
-        }}
-        a:hover {{
-            text-decoration: underline;
-        }}
-        .footer {{
-            margin-top: 40px;
-            padding-top: 20px;
-            border-top: 1px solid #eee;
-            color: #999;
-            font-size: 14px;
-            text-align: center;
-        }}
-        .emoji {{
-            font-size: 1.2em;
-        }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        {html_content}
-        <div class="footer">
-            <p>📧 This email was automatically generated and sent</p>
-            <p>🤖 Compiled by Google Gemini AI | 🔄 Updated daily</p>
-            <p>💡 Sources: Google News, arXiv, and professional websites</p>
+    return f"""
+    <html>
+    <body style="font-family: sans-serif; line-height: 1.6; color: #333; max-width: 700px; margin: auto; padding: 20px;">
+        <div style="background-color: #f8f9fa; padding: 30px; border-radius: 15px; border-top: 5px solid #4285f4;">
+            {html}
+            <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
+            <p style="font-size: 12px; color: #777; text-align: center;">
+                Generated by Gemini AI | Sources: Google News, Reddit, arXiv | Filter: AI + Disability (30 Days)
+            </p>
         </div>
-    </div>
-</body>
-</html>
-"""
-    return styled_html
-
+    </body>
+    </html>
+    """
 
 def send_email(subject, html_content):
-    """Send HTML email"""
-    print("📧 Preparing to send email...")
-    
+    """Send the email via Gmail SMTP"""
+    print(f"📧 Sending email to {EMAIL_TO}...")
     msg = MIMEMultipart('alternative')
     msg['Subject'] = subject
     msg['From'] = EMAIL_FROM
     msg['To'] = EMAIL_TO
-    
-    # Add HTML content
-    html_part = MIMEText(html_content, 'html', 'utf-8')
-    msg.attach(html_part)
+    msg.attach(MIMEText(html_content, 'html'))
     
     try:
-        # Use Gmail SMTP
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(EMAIL_FROM, EMAIL_PASSWORD)
             server.send_message(msg)
-        
-        print("✅ Email sent successfully!")
+        print("✨ Success! Email sent.")
         return True
-        
     except Exception as e:
-        print(f"❌ Email sending failed: {str(e)}")
+        print(f"❌ SMTP Error: {str(e)}")
         return False
 
-
 def main():
-    """Main program"""
-    print("\n" + "="*60)
-    print("🚀 AI & Disability Daily Digest Generator")
-    print("="*60 + "\n")
+    print("\n" + "="*50)
+    print("🚀 STARTING AI & DISABILITY DIGEST PROCESS")
+    print("="*50)
     
-    # 1. Fetch articles
-    articles = fetch_articles()
-    
-    if not articles:
-        print("⚠️  No articles found, exiting")
+    raw_articles = fetch_articles()
+    if not raw_articles:
+        print("❌ No articles found in feeds.")
         return
-    
-    # 2. Filter relevant articles
-    relevant_articles = filter_relevant_articles(articles)
-    
-    if not relevant_articles:
-        print("⚠️  No relevant articles found, exiting")
+        
+    filtered = filter_relevant_articles(raw_articles)
+    if not filtered:
+        print("⚠️ No articles matched the 'AI + Disability' criteria today.")
         return
+        
+    digest_text = generate_digest_with_gemini(filtered)
+    if not digest_text: return
     
-    # 3. Generate digest
-    digest = generate_digest_with_gemini(relevant_articles)
-    
-    if not digest:
-        print("❌ Digest generation failed")
-        return
-    
-    # 4. Convert to HTML
-    html_content = create_html_email(digest)
-    
-    # 5. Send email
-    today = datetime.now().strftime('%Y-%m-%d')
-    subject = f"🤖 AI & Disability Daily Digest - {today}"
-    
-    success = send_email(subject, html_content)
-    
-    if success:
-        print("\n" + "="*60)
-        print("✨ Complete! Today's digest has been sent to your inbox")
-        print("="*60 + "\n")
-    else:
-        print("\n❌ Sending failed, please check configuration")
-
+    html_email = create_html_email(digest_text)
+    subject = f"🤖 AI & Disability Digest: {len(filtered)} New Insights"
+    send_email(subject, html_email)
 
 if __name__ == "__main__":
     main()
